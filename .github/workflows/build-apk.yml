@@ -41,7 +41,7 @@ jobs:
           mkdir -p project
           unzip -o "${{ steps.zip.outputs.zip_file }}" -d project
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -49,26 +49,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK platforms
         shell: bash
         run: |
-          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
-              -type f -name sdkmanager -print -quit)"
-          fi
-
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager tidak ditemukan."
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --licenses || true
-
-          "$SDKMANAGER" \
-            "platform-tools" \
+          sdkmanager \
             "platforms;android-34" \
             "platforms;android-35" \
             "platforms;android-36" \
@@ -76,38 +63,23 @@ jobs:
             "build-tools;35.0.0" \
             "build-tools;36.0.0"
 
-      - name: Set up Gradle
-        shell: bash
-        run: |
-          if ! command -v gradle >/dev/null 2>&1; then
-            curl -fL \
-              https://services.gradle.org/distributions/gradle-8.9-bin.zip \
-              -o /tmp/gradle.zip
-
-            sudo unzip -q /tmp/gradle.zip -d /opt
-            echo "/opt/gradle-8.9/bin" >> "$GITHUB_PATH"
-            export PATH="/opt/gradle-8.9/bin:$PATH"
-          fi
-
-          gradle --version
-
       - name: Find Android project
         id: project
         shell: bash
         run: |
-          SETTINGS_FILE="$(find project -type f \
-            \( -name settings.gradle \
-            -o -name settings.gradle.kts \) \
-            -print -quit)"
+          SETTINGS_FILE="project/android/settings.gradle"
 
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: File settings.gradle tidak ditemukan."
+          if [ ! -f "$SETTINGS_FILE" ]; then
+            echo "ERROR: project/android/settings.gradle tidak ditemukan."
+            find project -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \)
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Proyek Android: $PROJECT_DIR"
+          echo "project_dir=project/android" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build debug APK
         shell: bash
@@ -124,12 +96,12 @@ jobs:
       - name: Find and prepare APK
         shell: bash
         run: |
-          APK_FILE="$(find project -type f \
+          APK_FILE="$(find project/android -type f \
             -path '*/build/outputs/apk/debug/*.apk' \
             -print -quit)"
 
           if [ -z "$APK_FILE" ]; then
-            echo "ERROR: APK belum berhasil dibuat."
+            echo "ERROR: APK tidak ditemukan setelah build."
             exit 1
           fi
 

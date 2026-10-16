@@ -21,6 +21,7 @@ jobs:
           SRC='Ani-Games-Billing-Android-GITHUB-BUILD-v11.29.1-APIKEY-FIX-ICON.zip'
           test -s "$SRC"
           unzip -t "$SRC" | tail -2
+          cp "$SRC" "$GITHUB_WORKSPACE/v12-android-baseline-source.zip"
           mkdir -p "$RUNNER_TEMP/v11src"
           unzip -oq "$SRC" -d "$RUNNER_TEMP/v11src"
           HTML_ROOT="$(find "$RUNNER_TEMP/v11src" -type f -path '*/assets/web/index.html' -print -quit | xargs -r dirname)"
@@ -56,6 +57,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: v12-android-source-audit
-          path: v12-source-audit.txt
+          path: |
+            v12-source-audit.txt
+            v12-android-baseline-source.zip
           if-no-files-found: error
           retention-days: 7

@@ -25,33 +25,33 @@ jobs:
           unzip -oq "$SRC" -d "$RUNNER_TEMP/v11src"
           HTML_ROOT="$(find "$RUNNER_TEMP/v11src" -type f -path '*/assets/web/index.html' -print -quit | xargs -r dirname)"
           test -n "$HTML_ROOT"
-          echo "WEB_ROOT=$HTML_ROOT"
-          echo "HTML ROOT: $HTML_ROOT"
           python3 - "$HTML_ROOT" "$GITHUB_WORKSPACE/v12-source-audit.txt" <<'PY'
           import re, sys
           from pathlib import Path
           root, out = Path(sys.argv[1]), Path(sys.argv[2])
           lines = [f"V12 SOURCE AUDIT — Android Billing V11.29.1", f"Web root: {root}", ""]
-          for name in ("index.html", "admin.html", "login.html"):
+          for name in ("index.html", "admin.html", "admin-control.html", "billing.html"):
               path = root / name
               if not path.is_file():
                   continue
               text = path.read_text(encoding="utf-8", errors="replace")
               lines += [f"=== {name} ({len(text)} chars, {len(text.splitlines())} lines) ==="]
+              for pattern in (r"async function boot", r"function boot", r"auth\.onAuthStateChange", r"async function login", r"function login", r"function signIn", r"async function signIn", r"async function rpc", r"async function .*Login", r"function .*Login"):
+                  match = re.search(pattern, text, re.I)
+                  if match:
+                      start, end = max(0, match.start()-180), min(len(text), match.end()+500)
+                      lines.append(f"-- {pattern} @ chars {match.start()} --")
+                      lines.append(text[start:end].replace("\n", " ")[:900])
               for i, line in enumerate(text.splitlines(), 1):
-                  if re.search(r"SB_URL|SB_KEY|supabase\.createClient|function\s+rpc\(|async function rpc|db_route|<meta[^>]+viewport|@media|grid-template-columns|min-width|overflow-x|<title>|<h1|<h2|class=[\"'][^\"']*(?:top|nav|wrap|shell|grid|card|panel|table)", line, re.I):
-                      lines.append(f"{i}: {line[:300]}")
+                  if re.search(r"SB_URL|SB_KEY|supabase\.createClient|function\s+rpc\(|async function rpc|db_route|<meta[^>]+viewport|@media|grid-template-columns|min-width|overflow-x|<title>|<h1|<h2", line, re.I):
+                      lines.append(f"{i}: {line[:200]}")
               lines.append("")
           lines += ["=== HTML/CSS assets ==="]
           for p in sorted(root.rglob("*")):
               if p.is_file() and p.suffix.lower() in (".html", ".css", ".js"):
-                  try:
-                      size = p.stat().st_size
-                  except OSError:
-                      size = 0
-                  lines.append(f"{p.relative_to(root)}\t{size}")
+                  lines.append(f"{p.relative_to(root)}\t{p.stat().st_size}")
           out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-          print(out.read_text(encoding="utf-8")[:24000])
+          print(out.read_text(encoding="utf-8")[:35000])
           PY
       - uses: actions/upload-artifact@v4
         with:

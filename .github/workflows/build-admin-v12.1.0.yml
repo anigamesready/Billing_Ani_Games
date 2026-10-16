@@ -1,0 +1,150 @@
+name: Build AniGames Admin Android V12.1.0 Debug
+on:
+  push:
+    branches: [build/v12-admin-12.1.0]
+    paths:
+      - '.github/workflows/build-admin-v12.1.0.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-admin-v12:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout isolated V12 build branch
+        uses: actions/checkout@v4
+      - name: Recover and verify reviewed dashboard patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/v12patch"
+          cat v12-admin-patch-parts/patch-part-*.b64 | tr -d '\r\n ' | base64 --decode | gzip --decompress > "$RUNNER_TEMP/v12patch/admin-v12.patch"
+          echo "cfa21f75e789265bb5650ede511e6702aac9d607c6807cbf28f4eedc5b2198e6  $RUNNER_TEMP/v12patch/admin-v12.patch" | sha256sum --check
+      - name: Verify and isolate V11.29.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="Ani-Games-Billing-Android-GITHUB-BUILD-v11.29.1-APIKEY-FIX-ICON.zip"
+          test -s "$SRC"
+          unzip -t "$SRC" | tail -2
+          mkdir -p "$RUNNER_TEMP/v11-source" "$RUNNER_TEMP/v12-admin-build"
+          unzip -oq "$SRC" -d "$RUNNER_TEMP/v11-source"
+          cp -a "$RUNNER_TEMP/v11-source/." "$RUNNER_TEMP/v12-admin-build/"
+          echo "ANDROID_DIR=$RUNNER_TEMP/v12-admin-build/android" >> "$GITHUB_ENV"
+          echo "WEB_DIR=$RUNNER_TEMP/v12-admin-build/android/app/src/main/assets/web" >> "$GITHUB_ENV"
+      - name: Apply dashboard patch and V12.1.0 package identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch -p1 -d "$WEB_DIR" < "$RUNNER_TEMP/v12patch/admin-v12.patch"
+          echo "63d7ea7216d79a116437a3b11f8d6149bfc144c92ddabdebc4bd5f9dfd65ad92  $WEB_DIR/admin.html" | sha256sum --check
+          python3 - "$ANDROID_DIR" <<'PY'
+          import re, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          gradle = root / "app/build.gradle"
+          text = gradle.read_text()
+          replacements = [
+              (r"(applicationId\s+)[\"']com\.anigames\.billingadmin[\"']", r"\1'com.anigames.billingadmin.v12test'"),
+              (r"versionCode\s+\d+", "versionCode 32"),
+              (r"versionName\s+[\"'][^\"']+[\"']", "versionName '12.1.0'"),
+          ]
+          for pattern, repl in replacements:
+              text, count = re.subn(pattern, repl, text, count=1)
+              if count != 1:
+                  raise SystemExit("Gradle metadata replacement did not match: " + pattern)
+          gradle.write_text(text)
+          java_files = list((root / "app/src/main/java").rglob("MainActivity.java"))
+          if len(java_files) != 1:
+              raise SystemExit("Expected exactly one MainActivity.java")
+          activity = java_files[0]
+          body = activity.read_text()
+          old = 'web.loadUrl("file:///android_asset/web/index.html");'
+          new = 'web.loadUrl("file:///android_asset/web/admin.html");'
+          if body.count(old) != 1:
+              raise SystemExit("Expected original WebView entry-point not found")
+          activity.write_text(body.replace(old, new, 1))
+          manifest = root / "app/src/main/AndroidManifest.xml"
+          body = manifest.read_text()
+          body, n = re.subn(r'android:label="Ani Games Billing Admin"', 'android:label="AniGames Admin V12 Test"', body, count=1)
+          if n != 1:
+              raise SystemExit("Expected Android app label not found")
+          manifest.write_text(body)
+          print("Applied isolated identity, Admin Dashboard launch, and V12.1.0 metadata.")
+          PY
+      - name: Audit dashboard structure, safety guards and JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$WEB_DIR/admin.html" <<'PY'
+          import re, subprocess, sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          text = p.read_text(encoding="utf-8")
+          ids = re.findall(r'\bid=["\']([^"\']+)["\']', text)
+          dup = sorted({x for x in ids if ids.count(x) > 1})
+          if dup: raise SystemExit("Duplicate HTML IDs: " + ", ".join(dup))
+          required = [
+              'id="billingUsers"', 'id="windowsChat"', 'id="databaseTools"',
+              'id="dbSyncExecute"', 'disabled title="Backend sinkronisasi belum siap',
+              'DB1_URL=', 'DB2_URL=', 'DB1_KEY=', 'DB2_KEY=',
+              'v12.1.0 pada DB1 dan DB2', "p_command:'show_admin_message'",
+          ]
+          for item in required:
+              if item not in text: raise SystemExit("Required dashboard/safety marker missing: " + item)
+          if 'service_role' in text.lower(): raise SystemExit("Forbidden service_role text present in client dashboard")
+          if "button.disabled=false" in text and "updateDbSyncDirection" in text:
+              # Explicitly ensure the sync control is never enabled by the direction handler.
+              fn = re.search(r'function updateDbSyncDirection\(\)\{(.*?)\n\}', text, re.S)
+              if not fn or not re.search(r'button\.disabled=true', fn.group(1)):
+                  raise SystemExit("DB sync action safety guard did not persist")
+          scripts = 0
+          for i, m in enumerate(re.finditer(r'<script\b([^>]*)>(.*?)</script\s*>', text, re.I|re.S), 1):
+              if re.search(r'\bsrc\s*=', m.group(1), re.I) or not m.group(2).strip(): continue
+              target = Path("/tmp") / f"admin-v12-inline-{i}.js"
+              target.write_text(m.group(2), encoding="utf-8")
+              subprocess.run(["node", "--check", str(target)], check=True)
+              scripts += 1
+          print(f"PASS: {len(ids)} unique DOM ids; {scripts} inline JS blocks syntactically valid; dual DB and safety markers present.")
+          PY
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+      - name: Install Android SDK platform and build tools
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+      - name: Compile debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace -p "$ANDROID_DIR" assembleDebug
+          APK="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          mkdir -p output
+          cp "$APK" output/Ani-Games-Admin-Android-v12.1.0-debug.apk
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -print | sort -V | tail -1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -1)"
+          test -n "$AAPT" && test -n "$APKSIGNER"
+          "$AAPT" dump badging output/Ani-Games-Admin-Android-v12.1.0-debug.apk | tee output/apk-badging.txt
+          grep -q "package: name='com.anigames.billingadmin.v12test' versionCode='32' versionName='12.1.0'" output/apk-badging.txt
+          "$APKSIGNER" verify --verbose output/Ani-Games-Admin-Android-v12.1.0-debug.apk
+          sha256sum output/Ani-Games-Admin-Android-v12.1.0-debug.apk | tee output/SHA256SUMS.txt
+          printf '%s\n'             'Build: AniGames Admin Android V12.1.0 Debug'             'Isolated app ID: com.anigames.billingadmin.v12test'             'Entry point: Admin Dashboard admin.html'             'DB selector: client-side selection feature; requires valid auth/routes for real test'             'Database sync: intentionally disabled; no copying or writes by sync control'             'Chat-to-PC: requires v12.1.0 SQL migration on both DBs and compatible PC build'             'V11 source ZIP and default branch: unchanged'             'Validation: source/hash/DOM/JS/build/package/signature checks; no live-device E2E test' > output/BUILD-REPORT.txt
+          ls -lh output
+      - name: Upload V12.1.0 Debug APK and verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: AniGames-Admin-Android-v12.1.0-debug
+          path: output/*
+          if-no-files-found: error
+          retention-days: 30

@@ -94,11 +94,14 @@ jobs:
           for item in required:
               if item not in text: raise SystemExit("Required dashboard/safety marker missing: " + item)
           if 'service_role' in text.lower(): raise SystemExit("Forbidden service_role text present in client dashboard")
-          if "button.disabled=false" in text and "updateDbSyncDirection" in text:
-              # Explicitly ensure the sync control is never enabled by the direction handler.
-              fn = re.search(r'function updateDbSyncDirection\(\)\{(.*?)\n\}', text, re.S)
-              if not fn or not re.search(r'button\.disabled=true', fn.group(1)):
-                  raise SystemExit("DB sync action safety guard did not persist")
+          marker = "function updateDbSyncDirection()"
+          if marker not in text:
+              raise SystemExit("DB sync direction handler missing")
+          start = text.index(marker)
+          end = text.find("\\n", start)
+          handler = text[start:end if end >= 0 else None]
+          if "button.disabled=true" not in handler or "button.disabled=false" in handler:
+              raise SystemExit("DB sync action safety guard did not persist")
           scripts = 0
           for i, m in enumerate(re.finditer(r'<script\b([^>]*)>(.*?)</script\s*>', text, re.I|re.S), 1):
               if re.search(r'\bsrc\s*=', m.group(1), re.I) or not m.group(2).strip(): continue

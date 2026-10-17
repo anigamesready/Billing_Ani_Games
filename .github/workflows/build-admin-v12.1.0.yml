@@ -143,8 +143,8 @@ jobs:
           }
           for name, ok in checks.items(): print(("PASS" if ok else "FAIL") + ": " + name)
           if not all(checks.values()): raise SystemExit("One or more alert/pairing checks failed")
-          scripts = [m.group(2) for m in re.finditer(r"<script\\b([^>]*)>(.*?)</script\\s*>", html, re.I|re.S)
-                     if not re.search(r"\\bsrc\\s*=", m.group(1), re.I) and m.group(2).strip()]
+          scripts = [m.group(2) for m in re.finditer(r"<script\b([^>]*)>(.*?)</script\s*>", html, re.I|re.S)
+                     if not re.search(r"\bsrc\s*=", m.group(1), re.I) and m.group(2).strip()]
           import subprocess
           if not scripts: raise SystemExit("No inline JS script found")
           target = Path("/tmp/admin-v12-rental-alerts.js")

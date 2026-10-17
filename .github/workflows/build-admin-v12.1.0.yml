@@ -73,34 +73,48 @@ jobs:
           manifest.write_text(body)
           print("Applied isolated identity, Admin Dashboard launch, and V12.1.0 metadata.")
           PY
-      - name: Inspect DB fallback and rental-session event hooks
+      - name: Inspect pairing functions and Android notification bridge points
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$WEB_DIR/admin.html" <<'PY'
+          python3 - "$WEB_DIR/admin.html" "$ANDROID_DIR" <<'PY'
           import re, sys
           from pathlib import Path
-          source = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-          source = re.sub(r"sb_publishable_[A-Za-z0-9_-]+", "[PUBLIC_KEY]", source)
+          web, root = Path(sys.argv[1]), Path(sys.argv[2])
+          src = web.read_text(encoding="utf-8", errors="replace")
+          src = re.sub(r"sb_publishable_[A-Za-z0-9_-]+", "[PUBLIC_KEY]", src)
+          m = re.search(r"<script\b[^>]*>(.*?)</script\s*>", src, re.I|re.S)
+          js = m.group(1) if m else src
+          print("ADMIN source chars=", len(src), "script chars=", len(js))
+          print("\n--- JavaScript named functions ---")
+          funcs = re.findall(r"(?:async\s+)?function\s+([\w$]+)\s*\(", js)
+          print(", ".join(dict.fromkeys(funcs)))
           patterns = [
-              ("pairing", r"pair(?:ing)?"),
-              ("fallback", r"fallback"),
-              ("DB1 config", r"DB1_URL|DB1_KEY"),
-              ("DB2 config", r"DB2_URL|DB2_KEY"),
-              ("usage_exceeded", r"usage_exceeded"),
-              ("rental/session", r"rental|session"),
-              ("expiry/stop", r"expir(?:y|ed|es)|stop(?:ped|_session)?|ended"),
-              ("PC command", r"pc_command|show_admin_message"),
-              ("notification/alert", r"notification|alert|vibrate|sound"),
+            ("pair fallback/code", r"pairing|pairdevice|pair_pc|pairing.?code|fallback|pair"),
+            ("DB2/route selection", r"activeDbConfig|DB_TARGET|DB2_URL|DB2_KEY|target.?===.?['\"]backup"),
+            ("PC pairing RPCs", r"rpc\(['\"][^'\"]*(?:pair|device|register)[^'\"]*"),
+            ("rental/session command", r"rental|session|selectedCmd|admin_command"),
+            ("expiry/stop statuses", r"expired|expiry|stopped|completed|terminated|end_time|expires_at"),
+            ("alert/event bridge", r"show_admin_message|notification|notify|vibrate|alert\(|android|JavascriptInterface"),
           ]
-          print("ADMIN_HTML_DIAGNOSTIC chars=", len(source))
           for label, pattern in patterns:
-              matches = list(re.finditer(pattern, source, re.I))
-              print(f"\n--- {label}: {len(matches)} matches; showing first 3 ---")
-              for match in matches[:3]:
-                  lo, hi = max(0, match.start()-260), min(len(source), match.end()+420)
-                  snippet = source[lo:hi].replace("\n", " ")
-                  print(snippet)
+            matches = list(re.finditer(pattern, js, re.I))
+            print(f"\n--- {label}: {len(matches)} script matches; up to 6 contexts ---")
+            seen = set()
+            shown = 0
+            for hit in matches:
+              lo, hi = max(0, hit.start()-500), min(len(js), hit.end()+750)
+              if any(lo < b and hi > a for a,b in seen): continue
+              seen.add((lo,hi))
+              print(js[lo:hi].replace("\n", " "))
+              shown += 1
+              if shown >= 6: break
+          print("\n--- MainActivity.java ---")
+          activities = list((root / "app/src/main/java").rglob("MainActivity.java"))
+          print(activities[0].read_text(errors="replace") if len(activities)==1 else f"Found {len(activities)} MainActivity.java files: {activities}")
+          print("\n--- AndroidManifest.xml ---")
+          manifest = root / "app/src/main/AndroidManifest.xml"
+          print(manifest.read_text(errors="replace") if manifest.exists() else "MISSING")
           PY
       - name: Audit dashboard structure, safety guards and JavaScript syntax
         shell: bash

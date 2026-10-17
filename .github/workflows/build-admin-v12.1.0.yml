@@ -4,6 +4,7 @@ on:
     branches: [build/v12-admin-12.1.0]
     paths:
       - '.github/workflows/build-admin-v12.1.0.yml'
+      - 'scripts/v12/patch_admin_alerts.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -73,39 +74,11 @@ jobs:
           manifest.write_text(body)
           print("Applied isolated identity, Admin Dashboard launch, and V12.1.0 metadata.")
           PY
-      - name: Inspect JavaScript pairing and rental session handlers
+      - name: Apply DB2 pairing diagnostics and Android rental alerts
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$WEB_DIR/admin.html" <<'PY'
-          import re, sys
-          from pathlib import Path
-          src=Path(sys.argv[1]).read_text(encoding="utf-8",errors="replace")
-          src=re.sub(r"sb_publishable_[A-Za-z0-9_-]+","[PUBLIC_KEY]",src)
-          matches=[m.group(2) for m in re.finditer(r"<script\b([^>]*)>(.*?)</script\s*>",src,re.I|re.S)
-                   if not re.search(r"\bsrc\s*=",m.group(1),re.I) and m.group(2).strip()]
-          js=max(matches,key=len) if matches else ""
-          print("ADMIN chars",len(src),"inline scripts",len(matches),"selected script chars",len(js))
-          print("\n--- functions ---")
-          print(", ".join(dict.fromkeys(re.findall(r"(?:async\s+)?function\s+([\w$]+)\s*\(",js))))
-          patterns=[
-            ("pairing/fallback",r"pairing.?code|pairdevice|pair_pc|fallback|pair"),
-            ("pairing RPC",r"rpc\(['\"][^'\"]*(?:pair|device|register)[^'\"]*"),
-            ("dual DB",r"activeDbConfig|DB_TARGET|DB2_URL|DB2_KEY|target.?===.?['\"]backup"),
-            ("session table/rpc",r"rpc\(['\"][^'\"]*(?:session|rental|device)[^'\"]*"),
-            ("session lifecycle",r"expired|expiry|stopped|completed|terminated|end_time|expires_at|rental|session"),
-            ("messages/notification",r"show_admin_message|notification|notify|vibrate|alert\(|admin_command"),
-          ]
-          for label,pattern in patterns:
-            found=list(re.finditer(pattern,js,re.I))
-            print(f"\n--- {label}: {len(found)} matches (up to 10 non-overlapping contexts) ---")
-            spans=[];shown=0
-            for h in found:
-              lo,hi=max(0,h.start()-430),min(len(js),h.end()+650)
-              if any(lo<y and hi>x for x,y in spans):continue
-              spans.append((lo,hi));print(js[lo:hi].replace("\n"," "));shown+=1
-              if shown>=10:break
-          PY
+          python3 scripts/v12/patch_admin_alerts.py "$WEB_DIR" "$ANDROID_DIR"
       - name: Audit dashboard structure, safety guards and JavaScript syntax
         shell: bash
         run: |
@@ -144,6 +117,41 @@ jobs:
               scripts += 1
           print(f"PASS: {len(ids)} unique DOM ids; {scripts} inline JS blocks syntactically valid; dual DB and safety markers present.")
           PY
+      - name: Verify DB2 pairing diagnostics and rental alert bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$WEB_DIR/admin.html" "$ANDROID_DIR" <<'PY'
+          import re, sys
+          from pathlib import Path
+          web, root = Path(sys.argv[1]), Path(sys.argv[2])
+          html = web.read_text(encoding="utf-8")
+          java = list((root / "app/src/main/java").rglob("MainActivity.java"))
+          if len(java) != 1: raise SystemExit("Expected one MainActivity.java")
+          java_text = java[0].read_text(encoding="utf-8")
+          manifest = (root / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+          checks = {
+              "rental transition listener": "v12InstallRentalAlerts" in html,
+              "native alert call": "notifyRentalEvent" in html,
+              "alert acknowledgement": "acknowledgeRentalEvent" in html,
+              "DB2 pairing diagnostic": "Pairing DB2 tidak tersedia" in html,
+              "DB2 pairing label": "DB2 • Cadangan" in html,
+              "high-priority notification channel": "NotificationManager.IMPORTANCE_HIGH" in java_text,
+              "alarm ringtone loop": "setLooping(true)" in java_text,
+              "JavaScript interface": '"AniGamesAdminNative"' in java_text,
+              "Android 13 notification permission": "android.permission.POST_NOTIFICATIONS" in manifest,
+          }
+          for name, ok in checks.items(): print(("PASS" if ok else "FAIL") + ": " + name)
+          if not all(checks.values()): raise SystemExit("One or more alert/pairing checks failed")
+          scripts = [m.group(2) for m in re.finditer(r"<script\\b([^>]*)>(.*?)</script\\s*>", html, re.I|re.S)
+                     if not re.search(r"\\bsrc\\s*=", m.group(1), re.I) and m.group(2).strip()]
+          import subprocess
+          if not scripts: raise SystemExit("No inline JS script found")
+          target = Path("/tmp/admin-v12-rental-alerts.js")
+          target.write_text(max(scripts, key=len), encoding="utf-8")
+          subprocess.run(["node", "--check", str(target)], check=True)
+          print("PASS: patched dashboard JavaScript parses.")
+          PY
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
@@ -175,7 +183,9 @@ jobs:
           grep -q "package: name='com.anigames.billingadmin.v12test' versionCode='32' versionName='12.1.0'" output/apk-badging.txt
           "$APKSIGNER" verify --verbose output/Ani-Games-Admin-Android-v12.1.0-debug.apk
           sha256sum output/Ani-Games-Admin-Android-v12.1.0-debug.apk | tee output/SHA256SUMS.txt
-          printf '%s\n'             'Build: AniGames Admin Android V12.1.0 Debug'             'Isolated app ID: com.anigames.billingadmin.v12test'             'Entry point: Admin Dashboard admin.html'             'DB selector: client-side selection feature; requires valid auth/routes for real test'             'Database sync: intentionally disabled; no copying or writes by sync control'             'Chat-to-PC: requires v12.1.0 SQL migration on both DBs and compatible PC build'             'V11 source ZIP and default branch: unchanged'             'Validation: source/hash/DOM/JS/build/package/signature checks; no live-device E2E test' > output/BUILD-REPORT.txt
+          printf '%s\n'             'Build: AniGames Admin Android V12.1.0 Debug'             'Isolated app ID: com.anigames.billingadmin.v12test'             'Entry point: Admin Dashboard admin.html'             'DB selector: client-side selection feature; requires valid auth/routes for real test'             'Database sync: intentionally disabled; no copying or writes by sync control'             'Chat-to-PC: requires v12.1.0 SQL migration on both DBs and compatible PC build'             'Rental alert popup + Android notification channel + looping alarm implemented; requires notification permission and alarm volume enabled' \
+             'DB2 pairing code is tagged to selected DB; automatic cross-project fallback requires valid DB2 owner/RPC/data setup' \
+             'V11 source ZIP and default branch: unchanged'             'Validation: source/hash/DOM/JS/build/package/signature checks; no live-device E2E test' > output/BUILD-REPORT.txt
           ls -lh output
       - name: Upload V12.1.0 Debug APK and verification report
         uses: actions/upload-artifact@v4

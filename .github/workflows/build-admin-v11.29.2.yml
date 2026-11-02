@@ -1,0 +1,193 @@
+name: Build Ani Games Admin APK v11.29.2
+
+on:
+  push:
+    branches:
+      - release/v11.29.2-rental-delete-windows-ack
+    paths:
+      - .github/workflows/build-admin-v11.29.2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build-admin-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android SDK 35 packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+
+      - name: Extract the pinned Admin source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="Ani-Games-Billing-Android-GITHUB-BUILD-v11.29.1-APIKEY-FIX-ICON.zip"
+          test -s "$ZIP"
+          unzip -t "$ZIP"
+          mkdir -p release-source
+          unzip -oq "$ZIP" -d release-source
+          SETTINGS="$(find release-source -type f -name settings.gradle -print -quit)"
+          test -n "$SETTINGS"
+          ANDROID_DIR="$(dirname "$SETTINGS")"
+          echo "ANDROID_DIR=$ANDROID_DIR" >> "$GITHUB_ENV"
+          echo "Using Android project: $ANDROID_DIR"
+
+      - name: Apply minimal rental and Windows-control patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$ANDROID_DIR" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          root = Path(sys.argv[1])
+          web = root / "app/src/main/assets/web"
+          control = web / "admin-control.html"
+          dashboard = web / "admin.html"
+
+          def replace_once(text, old, new, name):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"{name}: expected one source match, got {n}")
+              return text.replace(old, new, 1)
+
+          def replace_between(text, start, end, replacement, name):
+              a = text.find(start)
+              if a < 0:
+                  raise SystemExit(f"{name}: start marker missing")
+              b = text.find(end, a + len(start))
+              if b < 0:
+                  raise SystemExit(f"{name}: end marker missing")
+              return text[:a] + replacement + text[b:]
+
+          # Admin APK: wait for PC acknowledgements and report final vs delivery-only states.
+          s = control.read_text(encoding="utf-8")
+          old_wait = "async function waitCommand(commandId,timeoutMs=12000){const started=Date.now();while(Date.now()-started<timeoutMs){const row=await rpc('billing_command_status',{p_session_token:token,p_command_id:commandId});if(row&&['completed','failed','expired'].includes(row.status))return row;await new Promise(r=>setTimeout(r,1200));}return null}"
+          new_wait = "async function waitCommand(commandId,timeoutMs=12000,returnOnDelivery=false){if(!commandId)return null;const started=Date.now();while(Date.now()-started<timeoutMs){const row=await rpc('billing_command_status',{p_session_token:token,p_command_id:commandId});if(row&&['completed','failed','expired'].includes(row.status))return row;if(returnOnDelivery&&row&&(['delivered','acknowledged'].includes(row.status)||row.result?.phase==='delivered'))return row;await new Promise(r=>setTimeout(r,1200));}return null}"
+          s = replace_once(s, old_wait, new_wait, "Admin command status polling")
+
+          new_send = "async function sendCommand(command,payload={}){const d=devices.find(x=>x.id===selectedId);if(!d)return msg('Pilih PC terlebih dahulu.',true);if(!isOnline(d))return msg('PC OFFLINE — command tidak dikirim.',true);if(!confirm('Kirim '+command+' ke '+(d.device_name||d.client_id)+'?'))return;try{const queued=await rpc('billing_command',{p_session_token:token,p_org_id:org.id,p_device_id:d.id,p_command:command,p_payload:{...payload,source:'billing-control'}});const transition=['restart_billing','logoff','restart_pc','shutdown','refresh'].includes(command);const state=await waitCommand(queued?.command_id,12000,transition);if(state?.status==='failed'||state?.status==='expired')throw new Error(state.result?.message||'PC menolak perintah '+command+'.');if(state?.status==='completed')msg('✅ Perintah '+command+' selesai dan dikonfirmasi PC '+(d.device_name||d.client_id)+'.');else if(state&&(['delivered','acknowledged'].includes(state.status)||state.result?.phase==='delivered'))msg('✅ PC '+(d.device_name||d.client_id)+' sudah menerima perintah '+command+'. Status akhir dapat terputus saat Windows/aplikasi berpindah sesi.');else msg('⚠️ Perintah '+command+' masuk antrean, tetapi PC belum mengonfirmasi. Periksa koneksi/heartbeat.');await refreshAll()}catch(e){msg(e.message||'Perintah gagal.',true)}}"
+          s = replace_between(s, "async function sendCommand(", "async function sessionCommand(", new_send, "Admin Windows command sender")
+
+          new_session = "async function sessionCommand(deviceId,sessionId,command){selectedId=deviceId;$('deviceSelect').value=deviceId;const d=devices.find(x=>x.id===deviceId);if(!isOnline(d))return msg('PC OFFLINE — command tidak dikirim.',true);if(!confirm(command.toUpperCase()+' sesi ini?'))return;try{const queued=await rpc('billing_command',{p_session_token:token,p_org_id:org.id,p_device_id:deviceId,p_command:command,p_payload:{session_id:sessionId,source:'billing-control'}});const state=await waitCommand(queued?.command_id,12000);if(state?.status==='failed'||state?.status==='expired')throw new Error(state.result?.message||'PC menolak perintah '+command+'.');if(state?.status==='completed')msg('✅ Perintah '+command+' selesai dan dikonfirmasi PC.');else msg('⚠️ Perintah '+command+' masuk antrean, tetapi PC belum mengonfirmasi dalam 12 detik.');await refreshAll()}catch(e){msg(e.message||'Perintah gagal.',true)}}"
+          s = replace_between(s, "async function sessionCommand(", "async function startTrial(", new_session, "Admin session command sender")
+
+          new_trial = "async function startTrial(){const d=devices.find(x=>x.id===selectedId);if(!d||!isOnline(d))return msg('Pilih PC ONLINE terlebih dahulu.',true);if(!confirm('Mulai trial 10 menit di '+(d.device_name||d.client_id)+'?'))return;try{const queued=await rpc('billing_start_trial',{p_session_token:token,p_org_id:org.id,p_device_id:d.id});const state=await waitCommand(queued?.command_id,12000);if(state?.status==='failed'||state?.status==='expired')throw new Error(state.result?.message||'PC menolak trial.');if(state?.status==='completed')msg('✅ Trial 10 menit diterima dan dikonfirmasi PC.');else msg('⚠️ Trial masuk antrean, tetapi PC belum mengonfirmasi dalam 12 detik.');await refreshAll()}catch(e){msg(e.message||'Trial gagal.',true)}}"
+          s = replace_between(s, "async function startTrial(", "async function disconnectSelected(", new_trial, "Admin trial command sender")
+
+          # Make the current active rental ID visible beside the selected PC status.
+          s = replace_once(s, "• Sesi: " + chr(36) + "{esc(st.code)} • Sisa:", "• User ID Rental Aktif: " + chr(36) + "{st.active?esc(st.code):'-'} • Sisa:", "Admin selected PC active rental ID")
+
+          # Rename the existing delete action; the existing billing_delete_rental RPC and PC ACK are retained.
+          rx = re.compile(r'(<button[^>]*deleteRental\([^>]*>)(?:Hapus|Hapus Data Rental)(</button>)', re.I)
+          s, n = rx.subn(r'\1Hapus Data Rental\2', s, count=1)
+          if n != 1 or "billing_delete_rental" not in s or "waitCommand(r.command_id)" not in s:
+              raise SystemExit("Admin APK rental delete flow was not found/intact")
+          control.write_text(s, encoding="utf-8")
+
+          # Admin dashboard: add the online PC's active rental code beside Status.
+          s = dashboard.read_text(encoding="utf-8")
+          s = replace_once(
+              s,
+              '<thead><tr><th>PC</th><th>Organisasi</th><th>Status</th><th>Last seen</th><th>Power</th><th>Kontrol</th></tr></thead>',
+              '<thead><tr><th>PC</th><th>Organisasi</th><th>Status</th><th>User ID Rental</th><th>Last seen</th><th>Power</th><th>Kontrol</th></tr></thead>',
+              "Admin PC table header"
+          )
+          s = replace_once(s, "String(d.client_id||'')).toLowerCase()", "String(d.client_id||'')+' '+String(d.metadata?.activeCode||'')).toLowerCase()", "Admin PC search field")
+          old_cell = "</td><td>" + chr(36) + "{d.last_seen_at?new Date(d.last_seen_at).toLocaleString('id-ID'):'-'}</td><td>" + chr(36) + "{esc(d.power_state||'-')}</td>"
+          new_cell = "</td><td><b>" + chr(36) + "{esc(d.metadata?.activeCode||'-')}</b></td><td>" + chr(36) + "{d.last_seen_at?new Date(d.last_seen_at).toLocaleString('id-ID'):'-'}</td><td>" + chr(36) + "{esc(d.power_state||'-')}</td>"
+          s = replace_once(s, old_cell, new_cell, "Admin PC active user ID cell")
+          s = replace_once(s, '<tr><td colspan="6" class="empty">Belum ada PC.</td></tr>', '<tr><td colspan="7" class="empty">Belum ada PC.</td></tr>', "Admin PC table empty state")
+
+          s = replace_once(s, '  #devices #deviceRows > tr > td:nth-child(4)::before { content:"Last seen"; }', '  #devices #deviceRows > tr > td:nth-child(4)::before { content:"User ID Rental"; }\n  #devices #deviceRows > tr > td:nth-child(5)::before { content:"Last seen"; }', "Admin responsive PC column 4/5")
+          s = replace_once(s, '  #devices #deviceRows > tr > td:nth-child(5)::before { content:"Power"; }', '  #devices #deviceRows > tr > td:nth-child(6)::before { content:"Power"; }', "Admin responsive PC power column")
+          s = replace_once(s, '  #devices #deviceRows > tr > td:nth-child(6)::before { content:"Kontrol"; }', '  #devices #deviceRows > tr > td:nth-child(7)::before { content:"Kontrol"; }', "Admin responsive PC control column")
+
+          # Replace rental deactivation choices with a clear deletion instruction.
+          s = replace_once(
+              s,
+              '<select id="adminEditRentalStatus"><option value="active">active</option><option value="paused">paused</option><option value="expired">expired</option><option value="disabled">disabled</option><option value="inactive">inactive</option></select>',
+              '<select id="adminEditRentalStatus"><option value="active">active</option><option value="paused">paused</option><option value="expired">expired</option></select><div class="muted">Untuk menghapus data rental, gunakan tombol Hapus Data Rental pada tabel.</div>',
+              "Admin rental status choices"
+          )
+          s = replace_once(s, "function closeAdminRentalEdit(){adminRentalEditState=null;$('rentalEditModal').classList.add('hidden')}", "function closeAdminRentalEdit(){adminRentalEditState=null;$('rentalEditModal').classList.add('hidden');$('adminEditRentalStatus').querySelectorAll('option[data-legacy-status]').forEach(o=>o.remove())}", "Admin rental edit close")
+          s = replace_once(s, "$('adminEditRentalStatus').value=row.status||'active';", "const statusSelect=$('adminEditRentalStatus');statusSelect.querySelectorAll('option[data-legacy-status]').forEach(o=>o.remove());const rowStatus=String(row.status||'active');if(!['active','paused','expired'].includes(rowStatus)){const legacy=document.createElement('option');legacy.value=rowStatus;legacy.textContent='Data lama • gunakan Hapus Data Rental';legacy.disabled=true;legacy.dataset.legacyStatus='1';statusSelect.appendChild(legacy)}statusSelect.value=rowStatus;", "Admin legacy rental status preservation")
+          s = replace_once(s, "const category=$('adminEditRentalCategory').value,status=$('adminEditRentalStatus').value,client=$('adminEditRentalClient').value.trim()||null;", "const category=$('adminEditRentalCategory').value,status=$('adminEditRentalStatus').value||st.original?.status||'active',client=$('adminEditRentalClient').value.trim()||null;", "Admin rental save preserves legacy status")
+          rx = re.compile(r'(<button[^>]*deleteRental\([^>]*>)(?:Hapus|Hapus Data Rental)(</button>)', re.I)
+          s, n = rx.subn(r'\1Hapus Data Rental\2', s, count=1)
+          if n != 1:
+              raise SystemExit("Admin dashboard Hapus Data Rental action was not found")
+          dashboard.write_text(s, encoding="utf-8")
+
+          # Only increment the app version. Package identity and all permissions stay unchanged.
+          gradle = root / "app/build.gradle"
+          g = gradle.read_text(encoding="utf-8")
+          g = replace_once(g, "versionCode 30", "versionCode 31", "Admin APK version code")
+          g = replace_once(g, "versionName '11.29.1'", "versionName '11.29.2'", "Admin APK version name")
+          gradle.write_text(g, encoding="utf-8")
+
+          # Guard against accidental package or feature changes.
+          assert "applicationId 'com.anigames.billingadmin'" in g
+          assert all(cmd in control.read_text(encoding="utf-8") for cmd in ("restart_billing", "logoff", "restart_pc", "shutdown", "refresh"))
+          assert "admin_delete_rental" in dashboard.read_text(encoding="utf-8")
+          assert '<th>User ID Rental</th>' in dashboard.read_text(encoding="utf-8")
+          print("Admin rental UI, PC table, and command acknowledgment patch verified.")
+          PY
+
+      - name: Validate JavaScript and build Admin APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$ANDROID_DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, subprocess, tempfile
+          web = Path("app/src/main/assets/web")
+          for name in ("admin.html", "admin-control.html"):
+              html = (web / name).read_text(encoding="utf-8")
+              scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", html, re.S | re.I)
+              for i, script in enumerate(scripts):
+                  if not script.strip():
+                      continue
+                  with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+                      f.write(script)
+                      temp = f.name
+                  subprocess.run(["node", "--check", temp], check=True)
+          print("Inline JavaScript syntax checks passed.")
+          PY
+          gradle --no-daemon --stacktrace -p . assembleDebug
+          mkdir -p release-output
+          cp app/build/outputs/apk/debug/app-debug.apk release-output/Ani-Games-Admin-v11.29.2-debug.apk
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          "$AAPT" dump badging release-output/Ani-Games-Admin-v11.29.2-debug.apk | grep -F "package: name='com.anigames.billingadmin' versionCode='31' versionName='11.29.2'"
+          sha256sum release-output/Ani-Games-Admin-v11.29.2-debug.apk > release-output/SHA256SUMS.txt
+          ls -lh release-output
+
+      - name: Upload Admin APK and patch checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ani-Games-Admin-v11.29.2-debug-apk
+          path: android-not-used
+          if-no-files-found: ignore
+          retention-days: 30

@@ -177,17 +177,17 @@ jobs:
           print("Inline JavaScript syntax checks passed.")
           PY
           gradle --no-daemon --stacktrace -p . assembleDebug
-          mkdir -p release-output
-          cp app/build/outputs/apk/debug/app-debug.apk release-output/Ani-Games-Admin-v11.29.2-debug.apk
+          mkdir -p "$GITHUB_WORKSPACE/release-output"
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/release-output/Ani-Games-Admin-v11.29.2-debug.apk"
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
-          "$AAPT" dump badging release-output/Ani-Games-Admin-v11.29.2-debug.apk | grep -F "package: name='com.anigames.billingadmin' versionCode='31' versionName='11.29.2'"
-          sha256sum release-output/Ani-Games-Admin-v11.29.2-debug.apk > release-output/SHA256SUMS.txt
-          ls -lh release-output
+          "$AAPT" dump badging "$GITHUB_WORKSPACE/release-output/Ani-Games-Admin-v11.29.2-debug.apk" | grep -F "package: name='com.anigames.billingadmin' versionCode='31' versionName='11.29.2'"
+          sha256sum "$GITHUB_WORKSPACE/release-output/Ani-Games-Admin-v11.29.2-debug.apk" > "$GITHUB_WORKSPACE/release-output/SHA256SUMS.txt"
+          ls -lh "$GITHUB_WORKSPACE/release-output"
 
       - name: Upload Admin APK and patch checksum
         uses: actions/upload-artifact@v4
         with:
           name: Ani-Games-Admin-v11.29.2-debug-apk
-          path: android-not-used
-          if-no-files-found: ignore
+          path: release-output/**
+          if-no-files-found: error
           retention-days: 30

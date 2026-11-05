@@ -1,0 +1,30 @@
+name: Export reseller source assets
+on:
+  push:
+    branches: [reseller-v1.0.0]
+    paths:
+      - "reseller/ui-v1.0.0.tar.gz"
+      - ".github/workflows/export-reseller-source.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package source assets
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          cp reseller/ui-v1.0.0.tar.gz export/ui-v1.0.0.tar.gz
+          sha256sum export/ui-v1.0.0.tar.gz > export/sha256.txt
+          file export/ui-v1.0.0.tar.gz >> export/sha256.txt
+          tar -tzf export/ui-v1.0.0.tar.gz > export/file-list.txt 2>export/tar-error.txt || true
+          ls -lh export
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reseller-source-assets
+          path: export/
+          if-no-files-found: error
+          retention-days: 7
